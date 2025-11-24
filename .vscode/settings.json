@@ -1,0 +1,15 @@
+{
+  "git.enabled": false,
+  "git.autofetch": false,
+  "git.autoStash": false,
+  "git.confirmSync": false,
+  "git.enableSmartCommit": false,
+  "git.postCommitCommand": "none",
+  "git.showPushSuccessNotification": false,
+  "scm.diffDecorations": "none",
+  "scm.alwaysShowProviders": false,
+  "scm.alwaysShowRepositories": false,
+  "workbench.activityBar.iconClickBehavior": "toggle",
+  "git.decorations.enabled": false,
+  "git.enableStatusBarSync": false
+}

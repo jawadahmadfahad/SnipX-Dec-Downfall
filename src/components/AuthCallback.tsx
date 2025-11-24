@@ -1,0 +1,48 @@
+import { useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { ApiService } from '../services/api';
+import toast from 'react-hot-toast';
+
+const AuthCallback = () => {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const { setUser } = useAuth();
+
+  useEffect(() => {
+    const token = searchParams.get('token');
+    if (token) {
+      ApiService.setToken(token);
+      fetch('http://localhost:5001/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+        .then(res => {
+          if (!res.ok) throw new Error('Failed to fetch user');
+          return res.json();
+        })
+        .then(user => {
+          setUser(user);
+          toast.success('Login successful!');
+          navigate('/editor');
+        })
+        .catch(() => {
+          toast.error('Failed to fetch user info');
+          navigate('/login');
+        });
+    } else {
+      toast.error('Authentication failed');
+      navigate('/login');
+    }
+  }, [searchParams, navigate, setUser]);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto"></div>
+        <p className="mt-4 text-gray-600">Completing authentication...</p>
+      </div>
+    </div>
+  );
+};
+
+export default AuthCallback;
