@@ -13,6 +13,8 @@ import AdminTickets from './pages/AdminTickets';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
 import AuthCallback from './components/AuthCallback';
+import LiveChat from './components/LiveChat';
+import KeyboardShortcuts from './components/KeyboardShortcuts';
 import { useAuth } from './contexts/AuthContext';
 
 function App() {
@@ -25,6 +27,8 @@ function App() {
       return (
         <div className="min-h-screen bg-gray-50 text-gray-900 flex flex-col">
           <Toaster position="top-right" />
+          <LiveChat />
+          <KeyboardShortcuts />
           <Routes>
             <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/editor" />} />
             <Route path="/signup" element={!isAuthenticated ? <Signup /> : <Navigate to="/editor" />} />

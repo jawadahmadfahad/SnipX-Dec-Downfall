@@ -31,14 +31,40 @@ CORS(app, supports_credentials=True)
 app.config['SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
 app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 500 * 1024 * 1024))
 
-# MongoDB connection
+# MongoDB connection with fallback to Atlas
+def connect_mongodb():
+    """Try local MongoDB first, fallback to MongoDB Atlas if local fails"""
+    local_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+    atlas_uri = os.getenv('MONGODB_ATLAS_URI')
+    
+    # Try local MongoDB first
+    try:
+        client = MongoClient(local_uri, serverSelectionTimeoutMS=5000)
+        client.server_info()
+        logger.info("✅ Connected to local MongoDB")
+        return client
+    except Exception as e:
+        logger.warning(f"⚠️ Local MongoDB connection failed: {str(e)}")
+    
+    # Fallback to MongoDB Atlas
+    if atlas_uri:
+        try:
+            client = MongoClient(atlas_uri, serverSelectionTimeoutMS=10000)
+            client.server_info()
+            logger.info("✅ Connected to MongoDB Atlas (cloud)")
+            return client
+        except Exception as e:
+            logger.error(f"❌ MongoDB Atlas connection failed: {str(e)}")
+    else:
+        logger.error("❌ No MONGODB_ATLAS_URI configured for fallback")
+    
+    raise Exception("Could not connect to any MongoDB instance")
+
 try:
-    client = MongoClient(os.getenv('MONGODB_URI'))
+    client = connect_mongodb()
     db = client.snipx
-    client.server_info()
-    logger.info("✅ Connected to MongoDB")
 except Exception as e:
-    logger.error(f"❌ MongoDB connection failed: {str(e)}")
+    logger.error(f"❌ All MongoDB connections failed: {str(e)}")
     raise
 
 # Initialize services
@@ -92,14 +118,17 @@ def google_callback():
 def require_auth(f):
     def decorated(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
+        print(f"[AUTH] Auth header: {auth_header[:50] if auth_header else 'None'}...")
         if not auth_header:
             return jsonify({'error': 'No authorization header'}), 401
 
         try:
             token = auth_header.split(' ')[1]
             user_id = auth_service.verify_token(token)
+            print(f"[AUTH] User ID from token: {user_id}")
             return f(user_id, *args, **kwargs)
         except Exception as e:
+            print(f"[AUTH] Token verification failed: {e}")
             return jsonify({'error': str(e)}), 401
 
     decorated.__name__ = f.__name__
@@ -267,19 +296,42 @@ def upload_video(user_id):
 def process_video(user_id, video_id):
     try:
         options = request.json.get('options', {})
+        logger.info(f"Processing video {video_id} with options: {options}")
+        print(f"[PROCESS] Video ID: {video_id}")
+        print(f"[PROCESS] Options received: {options}")
+        print(f"[PROCESS] generate_thumbnail: {options.get('generate_thumbnail', False)}")
+        print(f"[PROCESS] thumbnail_text: '{options.get('thumbnail_text')}'")
+        print(f"[PROCESS] thumbnail_frame_index: {options.get('thumbnail_frame_index')}")
+        
         video_service.process_video(video_id, options)
+        
+        # Get updated video to check outputs
+        video = video_service.get_video(video_id)
+        if video:
+            print(f"[PROCESS] Video outputs after processing: {video.outputs}")
+            logger.info(f"Video outputs: {video.outputs}")
+        
         return jsonify({'message': 'Processing completed successfully'}), 200
     except Exception as e:
         logger.error(f"Process error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/videos/<video_id>', methods=['GET'])
 @require_auth
 def get_video_status(user_id, video_id):
     try:
+        logger.info(f"Getting video status for video_id: {video_id}, user_id: {user_id}")
+        print(f"[GET_VIDEO] Fetching video {video_id}")
+        
         video = video_service.get_video(video_id)
         if not video:
+            logger.error(f"Video not found: {video_id}")
+            print(f"[GET_VIDEO] Video not found: {video_id}")
             return jsonify({'error': 'Video not found'}), 404
+
+        print(f"[GET_VIDEO] Found video: {video.filename}, status: {video.status}")
 
         # Convert custom Video object to dict
         if hasattr(video, 'to_dict'):
@@ -295,20 +347,28 @@ def get_video_status(user_id, video_id):
         if 'user_id' in video_dict:
             video_dict['user_id'] = str(video_dict['user_id'])
 
+        print(f"[GET_VIDEO] Returning video data: status={video_dict.get('status')}, outputs={video_dict.get('outputs')}")
         return jsonify(video_dict), 200
 
     except Exception as e:
         logger.error(f"Fetch video error: {str(e)}")
+        print(f"[GET_VIDEO] Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/videos', methods=['GET'])
 @require_auth
 def get_user_videos(user_id):
     try:
+        print(f"[GET_VIDEOS] Fetching videos for user_id: {user_id}")
         videos = video_service.get_user_videos(user_id)
+        print(f"[GET_VIDEOS] Found {len(videos)} videos")
         return jsonify(videos), 200
     except Exception as e:
         logger.error(f"List videos error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/videos/<video_id>', methods=['DELETE'])
@@ -319,6 +379,97 @@ def delete_video(user_id, video_id):
         return jsonify({'message': 'Video deleted successfully'}), 200
     except Exception as e:
         logger.error(f"Delete video error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+# Export/Render video with all edits (trim, text overlay, music)
+@app.route('/api/videos/<video_id>/export', methods=['POST'])
+@require_auth
+def export_video(user_id, video_id):
+    try:
+        video = video_service.get_video(video_id)
+        if not video:
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # Check if user owns the video
+        if str(video.user_id) != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        data = request.get_json() or {}
+        
+        # Get edit parameters
+        trim_start = data.get('trim_start', 0)  # Percentage 0-100
+        trim_end = data.get('trim_end', 100)  # Percentage 0-100
+        text_overlay = data.get('text_overlay', '')
+        text_position = data.get('text_position', 'center')
+        text_color = data.get('text_color', '#ffffff')
+        text_size = data.get('text_size', 32)
+        music_volume = data.get('music_volume', 50)
+        video_volume = data.get('video_volume', 100)
+        mute_original = data.get('mute_original', False)
+        
+        logger.info(f"Exporting video {video_id} with edits: trim={trim_start}-{trim_end}%, text='{text_overlay}'")
+        
+        # Process video with edits using video service
+        export_path = video_service.export_video_with_edits(
+            video_id=video_id,
+            trim_start=trim_start,
+            trim_end=trim_end,
+            text_overlay=text_overlay,
+            text_position=text_position,
+            text_color=text_color,
+            text_size=text_size,
+            music_volume=music_volume,
+            video_volume=video_volume,
+            mute_original=mute_original
+        )
+        
+        if not export_path or not os.path.exists(export_path):
+            return jsonify({'error': 'Export failed'}), 500
+        
+        # Return the download URL
+        return jsonify({
+            'message': 'Video exported successfully',
+            'download_url': f'/api/videos/{video_id}/download-export'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Export error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# Download exported video
+@app.route('/api/videos/<video_id>/download-export', methods=['GET'])
+@require_auth
+def download_exported_video(user_id, video_id):
+    try:
+        video = video_service.get_video(video_id)
+        if not video:
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # Check if user owns the video
+        if str(video.user_id) != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        # Get the exported video path
+        export_path = video.outputs.get('exported_video', video.outputs.get('processed_video', video.filepath))
+        
+        if not os.path.exists(export_path):
+            return jsonify({'error': 'Exported video not found'}), 404
+        
+        # Generate filename
+        base_name = os.path.splitext(video.filename)[0]
+        download_name = f"{base_name}_edited.mp4"
+        
+        return send_file(
+            export_path,
+            mimetype='video/mp4',
+            as_attachment=True,
+            download_name=download_name,
+            conditional=False
+        )
+    except Exception as e:
+        logger.error(f"Download export error: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
 # Add download endpoint for processed videos
@@ -340,10 +491,13 @@ def download_video(user_id, video_id):
         if not os.path.exists(processed_path):
             return jsonify({'error': 'Processed video not found'}), 404
         
+        # Ensure the file is properly closed before sending
         return send_file(
             processed_path,
+            mimetype='video/mp4',
             as_attachment=True,
-            download_name=f"enhanced_{video.filename}"
+            download_name=f"enhanced_{video.filename}",
+            conditional=False
         )
     except Exception as e:
         logger.error(f"Download error: {str(e)}")
@@ -576,6 +730,89 @@ def generate_subtitles(user_id, video_id):
         
     except Exception as e:
         logger.error(f"Generate subtitles error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/videos/<video_id>/thumbnail', methods=['GET'])
+def get_video_thumbnail(video_id):
+    try:
+        # Allow token from query string for img tags
+        token = request.args.get('token') or request.headers.get('Authorization', '').replace('Bearer ', '')
+        
+        if not token:
+            return jsonify({'error': 'No authorization provided'}), 401
+        
+        # Verify token
+        try:
+            user_id = auth_service.verify_token(token)
+        except Exception as e:
+            return jsonify({'error': 'Invalid token'}), 401
+        
+        video = video_service.get_video(video_id)
+        if not video:
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # Check if user owns the video
+        if str(video.user_id) != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        # Get the thumbnail index (default to primary/middle one)
+        thumbnail_index = request.args.get('index', type=int)
+        
+        if thumbnail_index is not None:
+            # Get specific thumbnail by index
+            thumbnails = video.outputs.get('thumbnails', [])
+            if 0 <= thumbnail_index < len(thumbnails):
+                thumbnail_path = thumbnails[thumbnail_index]
+            else:
+                return jsonify({'error': 'Thumbnail index out of range'}), 404
+        else:
+            # Get primary thumbnail
+            thumbnail_path = video.outputs.get('thumbnail')
+        
+        if not thumbnail_path or not os.path.exists(thumbnail_path):
+            return jsonify({'error': 'Thumbnail not found'}), 404
+        
+        return send_file(
+            thumbnail_path,
+            mimetype='image/jpeg',
+            as_attachment=False
+        )
+        
+    except Exception as e:
+        logger.error(f"Get thumbnail error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/videos/<video_id>/thumbnails', methods=['GET'])
+@require_auth
+def get_all_thumbnails(user_id, video_id):
+    try:
+        video = video_service.get_video(video_id)
+        if not video:
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # Check if user owns the video
+        if str(video.user_id) != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        thumbnails = video.outputs.get('thumbnails', [])
+        thumbnail_info = []
+        
+        for i, thumb_path in enumerate(thumbnails):
+            if os.path.exists(thumb_path):
+                thumbnail_info.append({
+                    'index': i,
+                    'url': f'/api/videos/{video_id}/thumbnail?index={i}',
+                    'filename': os.path.basename(thumb_path)
+                })
+        
+        return jsonify({
+            'thumbnails': thumbnail_info,
+            'primary_index': 2 if len(thumbnails) > 2 else 0,
+            'count': len(thumbnail_info)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Get thumbnails error: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.errorhandler(413)

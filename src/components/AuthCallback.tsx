@@ -20,10 +20,14 @@ const AuthCallback = () => {
           if (!res.ok) throw new Error('Failed to fetch user');
           return res.json();
         })
-        .then(user => {
-          setUser(user);
+        .then(userData => {
+          setUser({
+            email: userData.email,
+            firstName: userData.first_name || userData.firstName,
+            lastName: userData.last_name || userData.lastName
+          });
           toast.success('Login successful!');
-          navigate('/editor');
+          navigate('/features');
         })
         .catch(() => {
           toast.error('Failed to fetch user info');
